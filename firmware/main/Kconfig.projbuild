@@ -904,6 +904,21 @@ config WAKE_WORD_DETECTION_IN_LISTENING
         which allows interrupting the current conversation.
         When disabled (default), wake word detection is turned off during listening.
 
+config WAKE_WORD_DETECTION_IN_SPEAKING
+    bool "Enable Wake Word Detection in Speaking Mode"
+    default y
+    depends on USE_AFE_WAKE_WORD || USE_CUSTOM_WAKE_WORD
+    help
+        Enable AFE wake word detection while the device is speaking (TTS
+        playback), which allows interrupting the current utterance by voice.
+        When enabled (default), the AEC+VAD+WakeNet pipeline keeps running
+        on the audio_input task for the full duration of playback, sharing
+        the I2S bus and CPU core with audio output.
+        When disabled, wake word detection is turned off during speaking,
+        freeing that contention. Boards that never trigger playback via a
+        conversational voice loop (e.g. an MCP-controlled gateway that
+        issues speech on its own schedule) should disable this.
+
 config USE_AUDIO_PROCESSOR
     bool "Enable Audio Noise Reduction"
     default y

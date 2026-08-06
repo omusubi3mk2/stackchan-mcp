@@ -61,8 +61,19 @@ void PowerSaveTimer::OnShutdownRequest(std::function<void()> callback) {
 
 void PowerSaveTimer::PowerSaveCheck() {
     auto& app = Application::GetInstance();
-    if (!in_sleep_mode_ && !app.CanEnterSleepMode()) {
-        ticks_ = 0;
+    if (!app.CanEnterSleepMode()) {
+        // Previously this early-return only fired while !in_sleep_mode_, so
+        // once ticks_ reached seconds_to_sleep_ the countdown toward
+        // seconds_to_shutdown_ (PowerOff) kept running unconditionally even
+        // after the device became active again (e.g. transport reconnect),
+        // since nothing but an explicit WakeUp() call could clear
+        // in_sleep_mode_. Reconnecting without an audio-channel-open event
+        // never called WakeUp(), so the device silently powered itself off.
+        if (in_sleep_mode_) {
+            WakeUp();
+        } else {
+            ticks_ = 0;
+        }
         return;
     }
 

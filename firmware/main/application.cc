@@ -1095,8 +1095,20 @@ void Application::HandleStateChangedEvent() {
             }
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
+#ifdef CONFIG_WAKE_WORD_DETECTION_IN_SPEAKING
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+#else
+                // Disable wake word detection while speaking. The AEC+VAD+WakeNet
+                // pipeline runs on the high-priority, core-pinned audio_input task
+                // and shares the I2S bus with audio_output; on boards that never
+                // rely on voice-interrupt-during-TTS this contention has been
+                // observed to stall the main task long enough that the deferred
+                // tts.stop event is never processed, leaving the device stuck in
+                // Speaking until an unrelated transport-level timeout forces a
+                // reconnect.
+                audio_service_.EnableWakeWordDetection(false);
+#endif
             }
             listening_profile_ = ListeningProfileAfterStop(listening_profile_);
             audio_service_.ResetDecoder();

@@ -432,6 +432,24 @@ async def handle_pcm(request: web.Request) -> web.Response:
     return web.Response(text=json.dumps(result), content_type="application/json")
 
 
+async def handle_ota_stub(request: web.Request) -> web.Response:
+    """Local stand-in for the xiaozhi OTA/activation endpoint.
+
+    The stock firmware's ``CONFIG_OTA_URL`` defaults to Tenclass's cloud
+    (``https://api.tenclass.net/xiaozhi/ota/``) and phones home there on
+    every boot with the device MAC/UUID to check for a new firmware and
+    to run device activation, regardless of whether the gateway's own
+    WebSocket URL is honoured. This build points ``CONFIG_OTA_URL`` at
+    this route instead, so that check never leaves the LAN. Responding
+    with an empty JSON object is a valid, complete OTA response: no
+    ``firmware`` section means no update, no ``activation`` section means
+    no activation challenge, so ``Ota::CheckVersion()`` succeeds
+    immediately and the boot sequence moves straight on to the real
+    gateway WebSocket connection.
+    """
+    return web.json_response({})
+
+
 def create_capture_app(
     capture_token: str = "",
     pcm_token: str = "",
@@ -478,4 +496,6 @@ def create_capture_app(
     app.router.add_post("/capture", handle_capture)
     app.router.add_get("/avatar_set/{short_id}", handle_avatar_set_fetch)
     app.router.add_post("/pcm", handle_pcm)
+    app.router.add_post("/ota", handle_ota_stub)
+    app.router.add_get("/ota", handle_ota_stub)
     return app
