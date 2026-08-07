@@ -446,8 +446,18 @@ async def handle_ota_stub(request: web.Request) -> web.Response:
     no activation challenge, so ``Ota::CheckVersion()`` succeeds
     immediately and the boot sequence moves straight on to the real
     gateway WebSocket connection.
+
+    ``server_time`` is included so the device's RTC still gets set (the
+    firmware would otherwise boot with an unset clock, tm_year=70) even
+    though it's no longer fetching this from Tenclass. ``timestamp`` is
+    UTC milliseconds; ``timezone_offset`` (JST, +540 min) is added to it
+    firmware-side before the epoch is stored, matching how
+    ``Ota::CheckVersion`` applies it (see ota.cc).
     """
-    return web.json_response({})
+    now_ms = int(time.time() * 1000)
+    return web.json_response(
+        {"server_time": {"timestamp": now_ms, "timezone_offset": 540}}
+    )
 
 
 def create_capture_app(
