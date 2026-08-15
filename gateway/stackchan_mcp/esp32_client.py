@@ -865,6 +865,7 @@ class ESP32Manager:
                 logger.error("ESP32 tools discovery failed")
                 return
             await self._auto_render_idle_avatar(connection, device_id)
+            await self._auto_set_identity_led(connection, device_id)
             logger.info(
                 "ESP32 ready: device=%s tools=%d",
                 device_id,
@@ -900,6 +901,52 @@ class ESP32Manager:
         if error:
             logger.warning(
                 "auto-rendering idle avatar failed: device=%s error=%s",
+                device_id,
+                error,
+            )
+
+    async def _auto_set_identity_led(
+        self, connection: ESP32Connection, device_id: str
+    ) -> None:
+        """Best-effort base-ring LED color after a fresh device session init.
+
+        Re-asserts this gateway owner's identity color on every reconnect,
+        since the LED itself has no persistent state across a device power
+        cycle (sannin-kaigi discussion #3: relying on a one-time manual
+        set_all_leds call silently goes stale after any power-off/on).
+        Opt-in via STACKCHAN_IDENTITY_LED_RGB="r,g,b"; unset disables this.
+        """
+        raw = os.getenv("STACKCHAN_IDENTITY_LED_RGB", "")
+        if not raw:
+            return
+        try:
+            r, g, b = (int(part.strip()) for part in raw.split(","))
+        except ValueError:
+            logger.warning(
+                "STACKCHAN_IDENTITY_LED_RGB malformed (want 'r,g,b'): %r", raw
+            )
+            return
+
+        logger.info(
+            "auto-setting identity LED rgb=(%d,%d,%d): device=%s",
+            r, g, b, device_id,
+        )
+        try:
+            _result, error = await connection.call_tool(
+                "self.led.set_all",
+                {"r": r, "g": g, "b": b},
+            )
+        except Exception as exc:
+            logger.warning(
+                "auto-setting identity LED failed: device=%s error=%s",
+                device_id,
+                exc,
+            )
+            return
+
+        if error:
+            logger.warning(
+                "auto-setting identity LED failed: device=%s error=%s",
                 device_id,
                 error,
             )

@@ -700,6 +700,61 @@ async def test_reconnect_auto_renders_idle_avatar_again():
 
 
 @pytest.mark.asyncio
+async def test_init_skips_identity_led_when_not_configured(monkeypatch):
+    """No STACKCHAN_IDENTITY_LED_RGB means no led.set_all call at all."""
+    monkeypatch.delenv("STACKCHAN_IDENTITY_LED_RGB", raising=False)
+    mgr = ESP32Manager()
+    connection = _InitDeviceConnection()
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert ("self.led.set_all", {"r": 25, "g": 25, "b": 112}) not in connection.call_tool_calls
+
+
+@pytest.mark.asyncio
+async def test_init_auto_sets_identity_led_when_configured(monkeypatch):
+    """A configured STACKCHAN_IDENTITY_LED_RGB re-asserts the identity color on every init."""
+    monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "25,25,112")
+    mgr = ESP32Manager()
+    connection = _InitDeviceConnection()
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert ("self.led.set_all", {"r": 25, "g": 25, "b": 112}) in connection.call_tool_calls
+
+
+@pytest.mark.asyncio
+async def test_init_warns_and_skips_identity_led_when_malformed(monkeypatch, caplog):
+    """A malformed value is logged and does not raise or call the tool."""
+    caplog.set_level(logging.WARNING, logger="stackchan_mcp.esp32_client")
+    monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "not-a-color")
+    mgr = ESP32Manager()
+    connection = _InitDeviceConnection()
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert not any(name == "self.led.set_all" for name, _ in connection.call_tool_calls)
+    assert "STACKCHAN_IDENTITY_LED_RGB malformed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_init_continues_when_auto_identity_led_fails(monkeypatch, caplog):
+    """Identity LED failures are warnings and do not block ESP32 ready."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "25,25,112")
+    connection = _InitDeviceConnection(
+        auto_error={"code": -32000, "message": "device rejected set_all"}
+    )
+    mgr = ESP32Manager()
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert ("self.led.set_all", {"r": 25, "g": 25, "b": 112}) in connection.call_tool_calls
+    assert "auto-setting identity LED failed" in caplog.text
+    assert "ESP32 ready: device=device-test tools=1" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
     """avatar_set_loaded resolves the matching load_avatar_set waiter."""
     ws = _FakeWebSocket()
