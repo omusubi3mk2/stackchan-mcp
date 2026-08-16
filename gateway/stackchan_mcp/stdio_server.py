@@ -1173,6 +1173,10 @@ async def _dispatch_mcp_tool(
             "self.i2c.write_read",
             arguments,
         ),
+        "pmic_read_reg": (
+            "self.pmic.read_reg",
+            arguments,
+        ),
     }
 
     if name not in tool_map:
@@ -2759,6 +2763,39 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                     },
                     "required": ["addr", "write_bytes", "n_bytes"],
+                },
+            ),
+            Tool(
+                name="pmic_read_reg",
+                description=(
+                    "Read n_bytes starting at register `reg` from the "
+                    "on-board AXP2101 PMIC (internal I2C bus, addr 0x34) — "
+                    "NOT the external Grove Port A bus used by i2c_read/"
+                    "i2c_scan/i2c_write/i2c_write_read. On-demand "
+                    "alternative to the boot-time DumpDebugRegisters serial "
+                    "dump: reachable over WiFi/MCP, so it can inspect PMIC "
+                    "state after a normal boot even in scenarios (e.g. "
+                    "USB-less boot) where the serial console is unavailable "
+                    "during the event itself. Returns "
+                    "{\"ok\": true, \"reg\": .., \"bytes\": [...]}."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "reg": {
+                            "type": "integer",
+                            "description": "AXP2101 register address to start reading from.",
+                            "minimum": 0,
+                            "maximum": 255,
+                        },
+                        "n_bytes": {
+                            "type": "integer",
+                            "description": "Bytes to read (1..32).",
+                            "minimum": 1,
+                            "maximum": 32,
+                        },
+                    },
+                    "required": ["reg", "n_bytes"],
                 },
             ),
             Tool(

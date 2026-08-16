@@ -12,6 +12,12 @@ public:
     int GetBatteryLevel();
     float GetTemperature();
     void PowerOff();
+    void DumpDebugRegisters(const char* tag);
+    // On-demand register access for the self.pmic.read_reg MCP tool (WiFi/MCP
+    // path, sidesteps the USB-serial observability gap that blocks debugging
+    // USB-less boot failures — see stackchan_troubleshooting notes).
+    uint8_t ReadRegister(uint8_t reg);
+    void ReadRegisters(uint8_t reg, uint8_t* buffer, size_t length);
 
 private:
     int GetBatteryCurrentDirection();

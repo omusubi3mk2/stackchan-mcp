@@ -2298,6 +2298,7 @@ private:
     void InitializeAxp2101() {
         ESP_LOGI(TAG, "Init AXP2101");
         pmic_ = new Pmic(i2c_bus_, 0x34);
+        pmic_->DumpDebugRegisters("boot");
     }
 
     void InitializeAw9523() {
@@ -6418,6 +6419,44 @@ private:
                 return root;
             });
 
+        mcp_server.AddTool(
+            "self.pmic.read_reg",
+            "Read n_bytes starting at register `reg` from the on-board AXP2101 "
+            "PMIC (internal I2C bus, addr 0x34) — NOT the external Grove Port A "
+            "bus used by self.i2c.*. On-demand alternative to the boot-time "
+            "DumpDebugRegisters serial dump: reachable over WiFi/MCP, so it can "
+            "inspect PMIC state after a normal boot even when a USB-less boot "
+            "scenario makes the serial console unavailable during the failure "
+            "itself. Returns {\"ok\":true, \"reg\":.., \"bytes\":[...]}.",
+            PropertyList({
+                Property("reg", kPropertyTypeInteger, 0x00, 0xFF),
+                Property("n_bytes", kPropertyTypeInteger, 1, 32)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                cJSON* root = cJSON_CreateObject();
+                uint8_t reg = static_cast<uint8_t>(props["reg"].value<int>());
+                int n = props["n_bytes"].value<int>();
+
+                if (pmic_ == nullptr) {
+                    cJSON_AddBoolToObject(root, "ok", false);
+                    cJSON_AddStringToObject(root, "error", "pmic not initialized");
+                    return root;
+                }
+
+                std::vector<uint8_t> buf(static_cast<size_t>(n));
+                pmic_->ReadRegisters(reg, buf.data(), buf.size());
+
+                cJSON* bytes = cJSON_CreateArray();
+                for (uint8_t b : buf) {
+                    cJSON_AddItemToArray(bytes, cJSON_CreateNumber(b));
+                }
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddNumberToObject(root, "reg", reg);
+                cJSON_AddItemToObject(root, "bytes", bytes);
+                ESP_LOGI(TAG, "pmic.read_reg reg=0x%02X n=%d", reg, n);
+                return root;
+            });
+
         Property i2c_write_bytes_prop(
             "bytes", kPropertyTypeArray, kPropertyElementTypeInteger, 0, 255
         );
@@ -7077,10 +7116,24 @@ public:
         // but moving the scan is safer for any future I2C peripheral too.
         InitializeSpi();
         InitializeIli9342Display();
+        // EXPERIMENTAL soft-start staggering (2026-08-15, bumped 200ms->500ms
+        // 2026-08-16): USB-less boot from battery alone flickers the display
+        // on then browns out immediately (confirmed on a fully-charged
+        // battery, so not a charge-level issue). Leading hypothesis is
+        // inrush current from initializing display+camera+servo back-to-back
+        // exceeding the PMIC's instant supply headroom without USB's extra
+        // current budget. 200ms gaps improved but did not fix the USB-less
+        // boot failure (screen flicker persisted); trying 500ms next per the
+        // escalation plan. Spacing out the remaining heavy peripheral inits
+        // to test that hypothesis; revert this block if it doesn't fix the
+        // USB-less boot failure.
+        vTaskDelay(pdMS_TO_TICKS(500));
         InitializeCamera();
+        vTaskDelay(pdMS_TO_TICKS(500));
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
+        vTaskDelay(pdMS_TO_TICKS(500));
         InitializeServo();
         InitializeTouchSettings();
         InitializeSi12tTouch();
