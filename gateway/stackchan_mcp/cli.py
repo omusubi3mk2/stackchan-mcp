@@ -917,13 +917,22 @@ async def _run_streamable_http_daemon(
 
 def _run_streamable_http_placeholder(*, advertise_mdns: bool = True) -> None:
     """Run the Streamable HTTP MCP daemon."""
+    # Load .env / configure logging before importing http_server: that
+    # import chain (http_server -> stdio_server -> tts) instantiates
+    # VoicevoxEngine() at module import time, and its __init__ reads
+    # STACKCHAN_VOICEVOX_URL from the environment immediately. Importing
+    # http_server first freezes that engine on the un-configured default
+    # URL (VOICEVOX's in-container port, unreachable from the host) for
+    # the rest of the process's life, so every say() call hangs for the
+    # full httpx timeout before failing.
+    _configure_gateway_startup()
+
     from .ownership import release_lock_if_owner
     from .http_server import (
         get_configured_token,
         validate_bind_safety,
     )
 
-    _configure_gateway_startup()
     host, port = _resolve_mcp_http_endpoint()
     token = get_configured_token()
     try:
