@@ -453,7 +453,18 @@ async def handle_ota_stub(request: web.Request) -> web.Response:
     UTC milliseconds; ``timezone_offset`` (JST, +540 min) is added to it
     firmware-side before the epoch is stored, matching how
     ``Ota::CheckVersion`` applies it (see ota.cc).
+
+    Because this OTA check only runs once per firmware boot (a WebSocket
+    reconnect after a network hiccup does not repeat it), its arrival is
+    also the gateway's only signal that the device just power-cycled and
+    therefore lost whatever avatar_set was in PSRAM. Flag that on the
+    active :class:`Gateway`'s ESP32Manager so the next connection doesn't
+    wrongly treat a stale "avatar_set confirmed loaded" as still true
+    (sannin-kaigi #6/#9 follow-up).
     """
+    gateway = request.app.get(GATEWAY_KEY)
+    if gateway is not None:
+        gateway.esp32.mark_device_boot_detected()
     now_ms = int(time.time() * 1000)
     return web.json_response(
         {"server_time": {"timestamp": now_ms, "timezone_offset": 540}}

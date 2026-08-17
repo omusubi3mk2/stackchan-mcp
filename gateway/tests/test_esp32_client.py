@@ -712,8 +712,44 @@ async def test_init_skips_identity_led_when_not_configured(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_init_auto_sets_identity_led_when_configured(monkeypatch):
-    """A configured STACKCHAN_IDENTITY_LED_RGB re-asserts the identity color on every init."""
+async def test_init_clears_identity_led_when_avatar_identity_confirmed(monkeypatch):
+    """Once the idle avatar renders AND the owner avatar_set was confirmed
+    loaded (via a prior load_avatar_set), the LED hands off identity and
+    clears."""
+    monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "25,25,112")
+    mgr = ESP32Manager()
+    mgr._avatar_set_confirmed["device-test"] = True
+    connection = _InitDeviceConnection()
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert ("self.led.clear", {}) in connection.call_tool_calls
+    assert not any(name == "self.led.set_all" for name, _ in connection.call_tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_init_falls_back_to_identity_led_when_avatar_render_fails(monkeypatch):
+    """If the idle avatar never rendered, the LED still lights the identity color."""
+    monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "25,25,112")
+    mgr = ESP32Manager()
+    mgr._avatar_set_confirmed["device-test"] = True
+    connection = _InitDeviceConnection(
+        auto_error={"code": -32000, "message": "device rejected set_avatar"}
+    )
+
+    await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
+
+    assert ("self.led.set_all", {"r": 25, "g": 25, "b": 112}) in connection.call_tool_calls
+    assert not any(name == "self.led.clear" for name, _ in connection.call_tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_init_falls_back_to_identity_led_when_avatar_set_never_confirmed(monkeypatch):
+    """set_avatar succeeding is not proof of identity: the firmware silently
+    falls back to a generic placeholder face when no avatar_set has been
+    loaded into PSRAM (e.g. after a device power cycle). Without a prior
+    confirmed load_avatar_set for this device, the LED must stay lit even
+    though the render call itself reported success."""
     monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "25,25,112")
     mgr = ESP32Manager()
     connection = _InitDeviceConnection()
@@ -721,6 +757,7 @@ async def test_init_auto_sets_identity_led_when_configured(monkeypatch):
     await mgr._init_device(connection, "device-test")  # type: ignore[arg-type]
 
     assert ("self.led.set_all", {"r": 25, "g": 25, "b": 112}) in connection.call_tool_calls
+    assert not any(name == "self.led.clear" for name, _ in connection.call_tool_calls)
 
 
 @pytest.mark.asyncio
@@ -752,6 +789,80 @@ async def test_init_continues_when_auto_identity_led_fails(monkeypatch, caplog):
     assert ("self.led.set_all", {"r": 25, "g": 25, "b": 112}) in connection.call_tool_calls
     assert "auto-setting identity LED failed" in caplog.text
     assert "ESP32 ready: device=device-test tools=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_device_boot_detected_clears_stale_avatar_set_confirmation(caplog):
+    """A device power cycle (signalled via mark_device_boot_detected, called
+    from the /ota handler) invalidates any avatar_set_confirmed state from
+    before the reboot, since PSRAM does not survive it."""
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    ws = _GracefulCloseHandlerWebSocket(
+        [json.dumps({"type": "noop"})], close_code=1000, close_reason="normal"
+    )
+    mgr = ESP32Manager()
+    mgr._avatar_set_confirmed["device-test"] = True
+    mgr.mark_device_boot_detected()
+
+    await mgr._handler(ws)  # type: ignore[arg-type]
+
+    assert "device-test" not in mgr._avatar_set_confirmed
+    assert mgr._pending_boot_reset is False
+    assert "device power cycle detected" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_no_boot_detected_keeps_avatar_set_confirmation():
+    """Without a preceding /ota-signalled boot, a plain reconnect (e.g. a
+    WiFi hiccup) must not throw away a still-valid avatar_set confirmation."""
+    ws = _GracefulCloseHandlerWebSocket(
+        [json.dumps({"type": "noop"})], close_code=1000, close_reason="normal"
+    )
+    mgr = ESP32Manager()
+    mgr._avatar_set_confirmed["device-test"] = True
+
+    await mgr._handler(ws)  # type: ignore[arg-type]
+
+    assert mgr._avatar_set_confirmed["device-test"] is True
+
+
+class _AvatarLoadConnection:
+    """Fake connection for exercising ESP32Manager.send_avatar_set_fetch."""
+
+    def __init__(self, *, device_id: str = "device-test") -> None:
+        self.device_id = device_id
+        self.connected = True
+        self.call_tool_calls: list[tuple[str, dict]] = []
+
+    async def send_avatar_set_fetch(self, url, token, mode, checksum, expected_size, timeout):
+        return {"ok": True, "checksum": checksum, "error": None}
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.call_tool_calls.append((name, arguments))
+        return {"content": [{"type": "text", "text": "true"}]}, None
+
+
+@pytest.mark.asyncio
+async def test_load_avatar_set_clears_identity_led_immediately(monkeypatch):
+    """A successful avatar_set load clears the LED right away, without
+    waiting for the device to reconnect (sannin-kaigi #6/#9 follow-up)."""
+    monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "25,25,112")
+    mgr = ESP32Manager()
+    connection = _AvatarLoadConnection()
+    mgr._connection = connection  # type: ignore[assignment]
+
+    result = await mgr.send_avatar_set_fetch(
+        url="http://example/avatar_set/abc",
+        token="tok",
+        mode="layered",
+        checksum="sha256:abc",
+        expected_size=537_600,
+    )
+
+    assert result["ok"] is True
+    assert mgr._avatar_set_confirmed["device-test"] is True
+    assert ("self.led.clear", {}) in connection.call_tool_calls
+    assert not any(name == "self.led.set_all" for name, _ in connection.call_tool_calls)
 
 
 @pytest.mark.asyncio

@@ -459,6 +459,24 @@ class ESP32Manager:
         self._init_tasks: list[asyncio.Task] = []
         self._vision_url: str = ""
         self._vision_token: str = ""
+        # Tracks, per device_id, whether an owner-specific avatar_set has
+        # been confirmed loaded into the device's PSRAM at some point during
+        # this gateway process's lifetime. A bare set_avatar success is not
+        # enough on its own: the firmware silently falls back to a generic
+        # placeholder face when no avatar_set is loaded, so a successful
+        # set_avatar call cannot tell us whether the *identifiable* avatar
+        # is actually on screen (sannin-kaigi #6/#9 follow-up). This survives
+        # a plain WebSocket reconnect (the device's PSRAM does too), but is
+        # invalidated on a real device power cycle via
+        # mark_device_boot_detected() / _pending_boot_reset below.
+        self._avatar_set_confirmed: dict[str, bool] = {}
+        # Set by the /ota handler (capture_server.handle_ota_stub), the
+        # gateway's only signal that the device just power-cycled (the OTA
+        # check runs once per firmware boot, not on every WS reconnect).
+        # Consumed by _handler on the next connection to drop that device's
+        # stale avatar_set_confirmed entry, since PSRAM does not survive a
+        # real reboot.
+        self._pending_boot_reset: bool = False
         # Per-device serialisation for TTS send sequences. Acquired by
         # the orchestrator around the entire start → frames → stop
         # block so concurrent ``say()`` invocations cannot interleave
@@ -522,6 +540,15 @@ class ESP32Manager:
     def set_notify_config(self, notify_config: NotifyConfig) -> None:
         """Replace the startup notification config used for future events."""
         self._notify_config = notify_config
+
+    def mark_device_boot_detected(self) -> None:
+        """Record that the device just phoned home via /ota (real power-on).
+
+        Called by capture_server.handle_ota_stub. Consumed on the next
+        WebSocket connection to invalidate any stale avatar_set_confirmed
+        state for that device.
+        """
+        self._pending_boot_reset = True
 
     @property
     def device_connected(self) -> bool:
@@ -632,6 +659,15 @@ class ESP32Manager:
             ws.request.headers.get("Device-Id", "unknown") if ws.request else "unknown"
         )
         logger.info("ESP32 connecting: device=%s", device_id)
+
+        if self._pending_boot_reset:
+            self._pending_boot_reset = False
+            if self._avatar_set_confirmed.pop(device_id, None):
+                logger.info(
+                    "device power cycle detected (via /ota) — "
+                    "avatar_set confirmation reset: device=%s",
+                    device_id,
+                )
 
         connection = ESP32Connection(ws, session_id)
         connection.device_id = device_id
@@ -864,8 +900,13 @@ class ESP32Manager:
             if not connection.tools_discovered:
                 logger.error("ESP32 tools discovery failed")
                 return
-            await self._auto_render_idle_avatar(connection, device_id)
-            await self._auto_set_identity_led(connection, device_id)
+            avatar_rendered = await self._auto_render_idle_avatar(connection, device_id)
+            avatar_identity_confirmed = (
+                avatar_rendered and self._avatar_set_confirmed.get(device_id, False)
+            )
+            await self._auto_set_identity_led(
+                connection, device_id, avatar_identity_confirmed
+            )
             logger.info(
                 "ESP32 ready: device=%s tools=%d",
                 device_id,
@@ -876,10 +917,15 @@ class ESP32Manager:
 
     async def _auto_render_idle_avatar(
         self, connection: ESP32Connection, device_id: str
-    ) -> None:
-        """Best-effort idle avatar render after a fresh device session init."""
+    ) -> bool:
+        """Best-effort idle avatar render after a fresh device session init.
+
+        Returns whether the render actually succeeded, so callers (the
+        identity LED logic) can tell a real "avatar is showing" from a
+        merely-attempted one.
+        """
         if connection.avatar_render_sent:
-            return
+            return True
 
         logger.info(
             "auto-rendering idle avatar (no explicit set_avatar yet): device=%s",
@@ -896,7 +942,7 @@ class ESP32Manager:
                 device_id,
                 exc,
             )
-            return
+            return False
 
         if error:
             logger.warning(
@@ -904,9 +950,15 @@ class ESP32Manager:
                 device_id,
                 error,
             )
+            return False
+
+        return True
 
     async def _auto_set_identity_led(
-        self, connection: ESP32Connection, device_id: str
+        self,
+        connection: ESP32Connection,
+        device_id: str,
+        avatar_identity_confirmed: bool,
     ) -> None:
         """Best-effort base-ring LED color after a fresh device session init.
 
@@ -915,16 +967,55 @@ class ESP32Manager:
         cycle (sannin-kaigi discussion #3: relying on a one-time manual
         set_all_leds call silently goes stale after any power-off/on).
         Opt-in via STACKCHAN_IDENTITY_LED_RGB="r,g,b"; unset disables this.
+
+        Once the owner-specific idle avatar is confirmed showing on-screen,
+        it already carries the identity signal (each owner has their own
+        face set), so the LED ring hands that job off and clears instead
+        (sannin-kaigi #6/#9). A bare set_avatar RPC success is *not* enough
+        to clear the LED: the firmware silently falls back to a generic,
+        non-identifying placeholder face when no avatar_set has been loaded
+        into PSRAM yet (e.g. right after the device's own power cycle), and
+        that fallback is indistinguishable from a real render at the RPC
+        level. ``avatar_identity_confirmed`` must therefore also reflect
+        that this device has had an avatar_set load_avatar_set-confirmed at
+        least once this gateway process's lifetime — see
+        ESP32Manager._avatar_set_confirmed. Whenever that isn't true (avatar
+        render failed, no display, or the identity avatar was never
+        confirmed loaded), the LED still lights the identity color as a
+        fallback so identity remains visible somehow.
         """
         raw = os.getenv("STACKCHAN_IDENTITY_LED_RGB", "")
         if not raw:
             return
+
         try:
             r, g, b = (int(part.strip()) for part in raw.split(","))
         except ValueError:
             logger.warning(
                 "STACKCHAN_IDENTITY_LED_RGB malformed (want 'r,g,b'): %r", raw
             )
+            return
+
+        if avatar_identity_confirmed:
+            logger.info(
+                "clearing identity LED (identity avatar confirmed showing): device=%s",
+                device_id,
+            )
+            try:
+                _result, error = await connection.call_tool("self.led.clear", {})
+            except Exception as exc:
+                logger.warning(
+                    "clearing identity LED failed: device=%s error=%s",
+                    device_id,
+                    exc,
+                )
+                return
+            if error:
+                logger.warning(
+                    "clearing identity LED failed: device=%s error=%s",
+                    device_id,
+                    error,
+                )
             return
 
         logger.info(
@@ -1141,9 +1232,21 @@ class ESP32Manager:
         """
         if not self._connection or not self._connection.connected:
             return {"ok": False, "checksum": checksum, "error": "no_device"}
-        return await self._connection.send_avatar_set_fetch(
+        connection = self._connection
+        device_id = connection.device_id
+        result = await connection.send_avatar_set_fetch(
             url, token, mode, checksum, expected_size, timeout
         )
+        if result.get("ok"):
+            self._avatar_set_confirmed[device_id] = True
+            # Don't wait for the next reconnect to hand the identity signal
+            # off to the LED — the avatar is confirmed showing right now,
+            # so clear it immediately if this is still the same connection.
+            if self._connection is connection and connection.connected:
+                await self._auto_set_identity_led(
+                    connection, device_id, avatar_identity_confirmed=True
+                )
+        return result
 
     async def send_audio_frame(self, opus_frame: bytes) -> None:
         """Push a single Opus frame to the connected device.

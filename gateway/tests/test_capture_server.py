@@ -14,6 +14,7 @@ from stackchan_mcp.capture_server import (
     PCM_TOKEN_KEY,
     _is_authorized,
     create_capture_app,
+    handle_ota_stub,
     handle_pcm,
 )
 
@@ -268,3 +269,46 @@ async def test_capture_tolerates_non_utf8_question(tmp_path, monkeypatch):
             )
             resp = await client.post("/capture", data=mpwriter)
         assert resp.status == 200, await resp.text()
+
+
+# ---------------------------------------------------------------------------
+# /ota endpoint — device boot detection
+# ---------------------------------------------------------------------------
+
+
+class _FakeEsp32Manager:
+    def __init__(self) -> None:
+        self.boot_detected_calls = 0
+
+    def mark_device_boot_detected(self) -> None:
+        self.boot_detected_calls += 1
+
+
+class _FakeGatewayWithEsp32:
+    def __init__(self) -> None:
+        self.esp32 = _FakeEsp32Manager()
+
+
+@pytest.mark.asyncio
+async def test_ota_stub_marks_device_boot_detected_on_active_gateway():
+    """A device's /ota phone-home (once per firmware boot) flags a power
+    cycle on the active gateway's ESP32Manager (sannin-kaigi #6/#9)."""
+    fake_gateway = _FakeGatewayWithEsp32()
+    app = create_capture_app(gateway=fake_gateway)
+    request = make_mocked_request("POST", "/ota", app=app)
+
+    response = await handle_ota_stub(request)
+
+    assert response.status == 200
+    assert fake_gateway.esp32.boot_detected_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ota_stub_tolerates_no_active_gateway():
+    """No active Gateway (e.g. capture-only deployment) must not crash /ota."""
+    app = create_capture_app()
+    request = make_mocked_request("POST", "/ota", app=app)
+
+    response = await handle_ota_stub(request)
+
+    assert response.status == 200
