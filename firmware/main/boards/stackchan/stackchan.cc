@@ -5450,6 +5450,67 @@ private:
             });
 
         mcp_server.AddTool(
+            "self.ota_config.get",
+            "Read the NVS-backed OTA check-version URL override. Returns "
+            "nvs_url (empty if unset), kconfig_default (the build-time "
+            "CONFIG_OTA_URL fallback baked into this firmware image), and "
+            "effective_url (what CheckVersion() actually uses: nvs_url when "
+            "set, otherwise kconfig_default). Unlike the websocket gateway "
+            "URL, CONFIG_OTA_URL has no force-mode Kconfig override, so "
+            "nvs_url always wins once set.",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                Settings settings("wifi", false);
+                std::string nvs_url = settings.GetString("ota_url");
+                std::string kconfig_default = CONFIG_OTA_URL;
+                std::string effective_url = nvs_url.empty() ? kconfig_default : nvs_url;
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "nvs_url", nvs_url.c_str());
+                cJSON_AddStringToObject(root, "kconfig_default", kconfig_default.c_str());
+                cJSON_AddStringToObject(root, "effective_url", effective_url.c_str());
+                return root;
+            });
+
+        mcp_server.AddTool(
+            "self.ota_config.set",
+            "Update the NVS-backed OTA check-version URL override. Pass url "
+            "to set it; pass an empty string to clear the override and fall "
+            "back to the build-time CONFIG_OTA_URL default baked into this "
+            "image. This is what makes gateway hand-offs between machines "
+            "work without reflashing: point ota_url at whichever machine's "
+            "gateway should serve version checks next. The change is "
+            "persisted immediately but only takes effect on the next OTA "
+            "check (boot, or the periodic check timer), not the current one.",
+            PropertyList({Property("url", kPropertyTypeString, std::string())}),
+            [](const PropertyList& properties) -> ReturnValue {
+                const auto& url_property = properties["url"];
+                if (!url_property.was_provided()) {
+                    throw std::invalid_argument("url must be provided");
+                }
+
+                Settings settings("wifi", true);
+                std::string requested_url = url_property.value<std::string>();
+                if (requested_url.empty()) {
+                    settings.EraseKey("ota_url");
+                } else {
+                    settings.SetString("ota_url", requested_url);
+                }
+
+                std::string kconfig_default = CONFIG_OTA_URL;
+                std::string effective_url =
+                    requested_url.empty() ? kconfig_default : requested_url;
+
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddBoolToObject(root, "ok", true);
+                cJSON_AddStringToObject(root, "nvs_url", requested_url.c_str());
+                cJSON_AddStringToObject(root, "kconfig_default", kconfig_default.c_str());
+                cJSON_AddStringToObject(root, "effective_url", effective_url.c_str());
+                cJSON_AddStringToObject(root, "takes_effect", "next_ota_check");
+                return root;
+            });
+
+        mcp_server.AddTool(
             "self.robot.get_touch_sensor_enabled",
             "Read the NVS-backed head-touch sensor enable flag. When disabled, "
             "HandleTap / HandleStroke skip both the local motion response and "
