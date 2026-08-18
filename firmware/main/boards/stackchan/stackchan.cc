@@ -7188,24 +7188,28 @@ public:
         // but moving the scan is safer for any future I2C peripheral too.
         InitializeSpi();
         InitializeIli9342Display();
-        // EXPERIMENTAL soft-start staggering (2026-08-15, bumped 200ms->500ms
-        // 2026-08-16): USB-less boot from battery alone flickers the display
-        // on then browns out immediately (confirmed on a fully-charged
-        // battery, so not a charge-level issue). Leading hypothesis is
-        // inrush current from initializing display+camera+servo back-to-back
-        // exceeding the PMIC's instant supply headroom without USB's extra
-        // current budget. 200ms gaps improved but did not fix the USB-less
-        // boot failure (screen flicker persisted); trying 500ms next per the
+        // EXPERIMENTAL soft-start staggering (2026-08-15, 200ms->500ms
+        // 2026-08-16, 500ms->1000ms 2026-08-18): USB-less boot from battery
+        // alone flickers the display on then browns out immediately
+        // (confirmed on a fully-charged battery, so not a charge-level
+        // issue). Leading hypothesis is inrush current from initializing
+        // display+camera+servo back-to-back exceeding the PMIC's instant
+        // supply headroom without USB's extra current budget. 200ms then
+        // 500ms both improved the failure rate but did not eliminate it
+        // (screen flicker persisted both times). 2026-08-18: also tried
+        // writing AXP2101 REG0x27 (ponlevel/onlevel, matching the official
+        // StackChan OSS firmware's Pmic init) — no observable change, same
+        // flicker-then-black-screen symptom. Trying 1000ms next per the
         // escalation plan. Spacing out the remaining heavy peripheral inits
         // to test that hypothesis; revert this block if it doesn't fix the
         // USB-less boot failure.
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         InitializeCamera();
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         InitializeServo();
         InitializeTouchSettings();
         InitializeSi12tTouch();
