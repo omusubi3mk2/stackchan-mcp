@@ -5148,6 +5148,18 @@ private:
         static_cast<StackChanBoard*>(arg)->MouthSequenceTaskLoop();
     }
 
+    // DIAGNOSTIC (2026-08-18, sannin-kaigi #7): see the comment at the
+    // InitializeServo() call site. Runs InitializeServo() a few seconds
+    // after boot instead of inline in the constructor, to test whether the
+    // servo bus is the inrush-current source behind the USB-less boot
+    // failure.
+    static void DeferredServoInitTrampoline(void* arg) {
+        auto* self = static_cast<StackChanBoard*>(arg);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        self->InitializeServo();
+        vTaskDelete(nullptr);
+    }
+
     void MouthSequenceTaskLoop() {
         for (;;) {
             // Wait until something is enqueued (or self-signaled at the
@@ -7204,13 +7216,29 @@ public:
         // to test that hypothesis; revert this block if it doesn't fix the
         // USB-less boot failure.
         vTaskDelay(pdMS_TO_TICKS(1000));
+        // 2026-08-18 (sannin-kaigi #7): camera-skip diagnostic ruled the
+        // camera out (USB-less boot still failed with InitializeCamera()
+        // commented out) — restored to normal.
         InitializeCamera();
         vTaskDelay(pdMS_TO_TICKS(1000));
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
         vTaskDelay(pdMS_TO_TICKS(1000));
-        InitializeServo();
+        // DIAGNOSTIC (2026-08-18, sannin-kaigi #7): the official StackChan
+        // OSS firmware's M5StackCoreS3Board has no servo code at all — this
+        // fork's SCS0009 servo bus is the one peripheral with no working
+        // reference to diff against, and camera/soft-start experiments have
+        // already ruled out the other candidates. Deferring InitializeServo()
+        // (UART bus init + boot-init climb) to a background task a few
+        // seconds after boot, instead of running it inline here, to test
+        // whether the servo bus/VM_EN is the inrush-current source. servo_ok_
+        // defaults false and every servo-facing MCP tool already guards on
+        // it, so tools called before the deferred init lands should just
+        // report "not ready" rather than crash. Revert to an inline call
+        // either way once this test is done.
+        xTaskCreate(&StackChanBoard::DeferredServoInitTrampoline,
+                    "deferred_servo", 4096, this, 5, nullptr);
         InitializeTouchSettings();
         InitializeSi12tTouch();
         I2cDetect();
