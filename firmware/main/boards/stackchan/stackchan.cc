@@ -2731,42 +2731,15 @@ private:
         ESP_LOGI(TAG, "PY32 IO expander READY (version=0x%02X, attempt=%d/%d)",
                  version, winning_attempt, kBeginRetries);
 
-        // Pin 0 = VM EN (servo power switch). Output, pull-up, drive HIGH.
-        // We track each step so a partial success is reported precisely
-        // (e.g. direction set but pull-up failed) — much easier to debug
-        // than the previous "all-void, hope it stuck" version.
-        bool ok_dir   = io_expander_->SetDirection(0, true);
-        bool ok_pull  = io_expander_->SetPullMode(0, true);
-        bool ok_write = io_expander_->DigitalWrite(0, true);
-        vTaskDelay(pdMS_TO_TICKS(200));
-
-        if (!ok_dir || !ok_pull || !ok_write) {
-            const char* failed = "?";
-            if (!ok_dir)        failed = "SetDirection";
-            else if (!ok_pull)  failed = "SetPullMode";
-            else if (!ok_write) failed = "DigitalWrite";
-            ESP_LOGE(TAG, "Servo power ENABLE FAILED at step=%s", failed);
-            return;
-        }
-
-        // Verify by reading back the output low-byte register. Bit 0 must
-        // be high. If not, the chip ACK'd but the level didn't latch — log
-        // it loudly so we know the next move_head will be silent.
-        uint8_t out_low = 0;
-        if (io_expander_->ReadOutputLow(&out_low)) {
-            if (out_low & 0x01) {
-                ESP_LOGI(TAG, "Servo power ENABLED via PY32 pin 0 "
-                              "(VM EN HIGH confirmed, REG_GPIO_O_L=0x%02X)", out_low);
-            } else {
-                ESP_LOGE(TAG, "Servo power write succeeded but readback shows "
-                              "pin 0 LOW (REG_GPIO_O_L=0x%02X) — VM EN may be off!",
-                              out_low);
-            }
-        } else {
-            // Read failed but writes succeeded; assume the writes took.
-            ESP_LOGW(TAG, "Servo power writes OK, but readback verify failed "
-                          "(can't confirm VM EN level)");
-        }
+        // DIAGNOSTIC (2026-08-18, sannin-kaigi #7): VM EN (servo power rail)
+        // used to be enabled right here, inline. Split out to EnableServoPower()
+        // and moved to DeferredServoInitTrampoline (called right before
+        // InitializeServo()) so the actual servo motor power-on — not just
+        // the UART bus init — is what gets deferred a few seconds after
+        // boot. The earlier "defer InitializeServo() only" experiment left
+        // this VM EN write at its normal inline timing, so it wasn't
+        // actually testing servo power deferral. Revert (move the call back
+        // here, delete EnableServoPower()) once this test is done either way.
 
         // ---- RGB strip init (12x WS2812C on the StackChan base) ----
         // The data line is on PY32 pin 13 (not an ESP32 GPIO); the PY32
@@ -2803,6 +2776,55 @@ private:
         rgb_ok_ = true;
         ESP_LOGI(TAG, "RGB strip READY (%d WS2812C via PY32 pin %d, all cleared)",
                  RGB_LED_COUNT, RGB_DATA_PIN);
+    }
+
+    // DIAGNOSTIC (2026-08-18, sannin-kaigi #7): split out of
+    // InitializeIOExpander() (see comment there) so servo motor power-on
+    // (VM EN) can be deferred separately from InitializeServo()'s UART bus
+    // init. Requires io_expander_ to already be up; no-ops safely if PY32
+    // init failed.
+    void EnableServoPower() {
+        if (io_expander_ == nullptr) {
+            ESP_LOGW(TAG, "EnableServoPower: PY32 IO expander not initialized, skipping");
+            return;
+        }
+
+        // Pin 0 = VM EN (servo power switch). Output, pull-up, drive HIGH.
+        // We track each step so a partial success is reported precisely
+        // (e.g. direction set but pull-up failed) — much easier to debug
+        // than the previous "all-void, hope it stuck" version.
+        bool ok_dir   = io_expander_->SetDirection(0, true);
+        bool ok_pull  = io_expander_->SetPullMode(0, true);
+        bool ok_write = io_expander_->DigitalWrite(0, true);
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        if (!ok_dir || !ok_pull || !ok_write) {
+            const char* failed = "?";
+            if (!ok_dir)        failed = "SetDirection";
+            else if (!ok_pull)  failed = "SetPullMode";
+            else if (!ok_write) failed = "DigitalWrite";
+            ESP_LOGE(TAG, "Servo power ENABLE FAILED at step=%s", failed);
+            return;
+        }
+
+        // Verify by reading back the output low-byte register. Bit 0 must
+        // be high. If not, the chip ACK'd but the level didn't latch — log
+        // it loudly so we know the next move_head will be silent.
+        uint8_t out_low = 0;
+        if (io_expander_->ReadOutputLow(&out_low)) {
+            if (out_low & 0x01) {
+                ESP_LOGI(TAG, "Servo power ENABLED via PY32 pin 0 "
+                              "(VM EN HIGH confirmed, REG_GPIO_O_L=0x%02X)", out_low);
+            } else {
+                ESP_LOGE(TAG, "Servo power write succeeded but readback shows "
+                              "pin 0 LOW (REG_GPIO_O_L=0x%02X) — VM EN may be off!",
+                              out_low);
+            }
+        } else {
+            // Read failed but writes succeeded; assume the writes took.
+            ESP_LOGW(TAG, "Servo power writes OK, but readback verify failed "
+                          "(can't confirm VM EN level)");
+        }
     }
 
     // Helpers for the LED MCP tools below. Centralised so the parsing/
@@ -5148,14 +5170,18 @@ private:
         static_cast<StackChanBoard*>(arg)->MouthSequenceTaskLoop();
     }
 
-    // DIAGNOSTIC (2026-08-18, sannin-kaigi #7): see the comment at the
-    // InitializeServo() call site. Runs InitializeServo() a few seconds
-    // after boot instead of inline in the constructor, to test whether the
-    // servo bus is the inrush-current source behind the USB-less boot
-    // failure.
+    // DIAGNOSTIC (2026-08-18, sannin-kaigi #7): see the comments at
+    // EnableServoPower() and the InitializeServo() call site. Enables the
+    // VM EN servo power rail AND runs InitializeServo() a few seconds after
+    // boot instead of inline in the constructor, to test whether servo
+    // motor power-on is the inrush-current source behind the USB-less boot
+    // failure. (An earlier variant deferred InitializeServo() alone while
+    // VM EN stayed at its normal inline timing — that wasn't a real test of
+    // this hypothesis.)
     static void DeferredServoInitTrampoline(void* arg) {
         auto* self = static_cast<StackChanBoard*>(arg);
         vTaskDelay(pdMS_TO_TICKS(3000));
+        self->EnableServoPower();
         self->InitializeServo();
         vTaskDelete(nullptr);
     }
