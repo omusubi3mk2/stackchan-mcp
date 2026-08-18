@@ -75,6 +75,17 @@ public:
         WriteReg(0x90, 0xBF);
         WriteReg(0x94, 33 - 5);
         WriteReg(0x95, 33 - 5);
+        // EXPERIMENTAL (2026-08-18, sannin-kaigi #7): line-by-line diff
+        // against the official StackChan OSS firmware's Pmic constructor
+        // (m5stack/StackChan, firmware/main/hal/board/stackchan.cc) found
+        // this fork is missing the trailing REG0x27 (ponlevel) write the
+        // official one has. 0x27 packs irqlevel[5:4]/offlevel[3:2]/
+        // onlevel[1:0]; writing 0x00 sets onlevel=128ms (vs our EFUSE
+        // default, likely 512ms) — how long PWRON must be held low before
+        // AXP2101 recognizes a power-on request. Everything else in the two
+        // constructors matches. Untested hypothesis for the USB-less boot
+        // flicker; revert if it doesn't help.
+        WriteReg(0x27, 0x00);
     }
 
     void SetBrightness(uint8_t brightness) {
