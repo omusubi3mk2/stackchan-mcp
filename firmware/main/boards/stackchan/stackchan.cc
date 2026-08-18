@@ -7275,6 +7275,21 @@ public:
         RegisterMcpTools();
     }
 
+    // DIAGNOSTIC (2026-08-18, sannin-kaigi #7): display/camera/touchpad/
+    // servo (both UART init and VM EN power-on) have all been individually
+    // ruled out as the USB-less-boot inrush-current source. Application::
+    // Initialize() calls board.StartNetwork() right after board
+    // construction returns, which for WifiBoard means the ESP32 WiFi radio
+    // starting up — a known source of large (200-300mA+) transient current
+    // draw that this fork has never tested delaying. Overriding to wait a
+    // few seconds before handing off to the normal WifiBoard::StartNetwork()
+    // implementation. Revert (delete this override) once this test is done
+    // either way.
+    virtual void StartNetwork() override {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        WifiBoard::StartNetwork();
+    }
+
     virtual AudioCodec* GetAudioCodec() override {
         static CoreS3AudioCodec audio_codec(i2c_bus_,
             AUDIO_INPUT_SAMPLE_RATE,
