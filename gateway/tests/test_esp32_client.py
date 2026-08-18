@@ -827,15 +827,23 @@ async def test_no_boot_detected_keeps_avatar_set_confirmation():
 
 
 class _AvatarLoadConnection:
-    """Fake connection for exercising ESP32Manager.send_avatar_set_fetch."""
+    """Fake connection for exercising ESP32Manager.send_avatar_set_fetch.
 
-    def __init__(self, *, device_id: str = "device-test") -> None:
+    Simulates an instantly-responding device by resolving the manager's
+    waiter itself from inside send_avatar_set_fetch_message, exactly like
+    the real dispatch loop would when avatar_set_loaded arrives.
+    """
+
+    def __init__(self, *, device_id: str = "device-test", manager: ESP32Manager) -> None:
         self.device_id = device_id
         self.connected = True
         self.call_tool_calls: list[tuple[str, dict]] = []
+        self._manager = manager
 
-    async def send_avatar_set_fetch(self, url, token, mode, checksum, expected_size, timeout):
-        return {"ok": True, "checksum": checksum, "error": None}
+    async def send_avatar_set_fetch_message(self, url, token, mode, checksum, expected_size) -> None:
+        self._manager.handle_avatar_set_loaded(
+            {"ok": True, "checksum": checksum, "error": None}
+        )
 
     async def call_tool(self, name: str, arguments: dict):
         self.call_tool_calls.append((name, arguments))
@@ -848,7 +856,7 @@ async def test_load_avatar_set_clears_identity_led_immediately(monkeypatch):
     waiting for the device to reconnect (sannin-kaigi #6/#9 follow-up)."""
     monkeypatch.setenv("STACKCHAN_IDENTITY_LED_RGB", "25,25,112")
     mgr = ESP32Manager()
-    connection = _AvatarLoadConnection()
+    connection = _AvatarLoadConnection(manager=mgr)
     mgr._connection = connection  # type: ignore[assignment]
 
     result = await mgr.send_avatar_set_fetch(
@@ -870,9 +878,12 @@ async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
     """avatar_set_loaded resolves the matching load_avatar_set waiter."""
     ws = _FakeWebSocket()
     conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+    conn.device_id = "device-test"
+    mgr = ESP32Manager()
+    mgr._connection = conn  # type: ignore[assignment]
 
     task = asyncio.create_task(
-        conn.send_avatar_set_fetch(
+        mgr.send_avatar_set_fetch(
             url="https://example.invalid/avatar-set.bin",
             token="test-token",
             mode="replace",
@@ -898,21 +909,32 @@ async def test_send_avatar_set_fetch_resolves_when_loaded_event_arrives():
         "checksum": "sha256:avatar-set",
         "bytes": 1234,
     }
-    conn.handle_avatar_set_loaded(payload)
+    mgr.handle_avatar_set_loaded(payload)
 
     result = await asyncio.wait_for(task, timeout=1.0)
     assert result == payload
-    assert conn._avatar_set_waiters == {}
+    assert mgr._avatar_set_waiters == {}
 
 
 @pytest.mark.asyncio
-async def test_send_avatar_set_fetch_returns_disconnected_when_connection_drops():
-    """Disconnect wakes an in-flight avatar set fetch without waiting for timeout."""
+async def test_send_avatar_set_fetch_survives_reconnect_before_reply_arrives():
+    """A WS reconnect mid-transfer must not orphan the waiter (sannin-kaigi #17).
+
+    The device keeps working through its PSRAM write + SHA256 verify
+    regardless of WS churn above it (e.g. a keepalive-ping-timeout
+    disconnect while it's busy). Its late avatar_set_loaded reply must
+    still resolve the original send_avatar_set_fetch call, even though
+    the connection object that receives it is a different instance from
+    the one that sent the original request.
+    """
     ws = _FakeWebSocket()
     conn = ESP32Connection(ws, session_id="session-avatar")  # type: ignore[arg-type]
+    conn.device_id = "device-test"
+    mgr = ESP32Manager()
+    mgr._connection = conn  # type: ignore[assignment]
 
     task = asyncio.create_task(
-        conn.send_avatar_set_fetch(
+        mgr.send_avatar_set_fetch(
             url="https://example.invalid/avatar-set.bin",
             token="test-token",
             mode="replace",
@@ -921,23 +943,31 @@ async def test_send_avatar_set_fetch_returns_disconnected_when_connection_drops(
             timeout=30.0,
         )
     )
-
     await asyncio.sleep(0)
     assert len(ws.sent) == 1
-    assert len(conn._avatar_set_waiters) == 1
 
-    started_at = asyncio.get_running_loop().time()
+    # Simulate a keepalive-ping-timeout disconnect + reconnect: the old
+    # connection is torn down and replaced with a brand new instance,
+    # exactly like ESP32Manager._handler does on a fresh "hello".
     conn.disconnect()
-    result = await asyncio.wait_for(task, timeout=1.0)
-    elapsed = asyncio.get_running_loop().time() - started_at
+    new_ws = _FakeWebSocket()
+    new_conn = ESP32Connection(new_ws, session_id="session-avatar-2")  # type: ignore[arg-type]
+    new_conn.device_id = "device-test"
+    mgr._connection = new_conn  # type: ignore[assignment]
 
-    assert result == {
-        "ok": False,
-        "checksum": "sha256:avatar-set",
-        "error": "disconnected",
-    }
-    assert elapsed < 1.0
-    assert conn._avatar_set_waiters == {}
+    # A disconnect alone must not resolve (let alone fail) the waiter.
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    # The device finishes its real work and the reply arrives on the
+    # gateway's dispatch loop, which always routes it through the
+    # manager — regardless of which connection object is "current" now.
+    payload = {"ok": True, "checksum": "sha256:avatar-set", "bytes": 1234}
+    mgr.handle_avatar_set_loaded(payload)
+
+    result = await asyncio.wait_for(task, timeout=1.0)
+    assert result == payload
+    assert mgr._avatar_set_waiters == {}
 
 
 class _GateableConnection:
